@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: silver-price-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python silver_price_bot.py
+    envVars:
+      - key: PORT
+        value: 8000
