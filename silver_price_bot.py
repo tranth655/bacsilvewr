@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bot Telegram Theo Dõi Giá Bạc - Railway Version (clean)
+Bot Telegram Theo Dõi Giá Bạc - Railway Version (fixed async)
 - Health server luôn trả 200 tại /health để tránh 503
-- PTB v20.7 (polling)
+- PTB v20.7 (polling, async-friendly)
 - Tính chênh lệch (spread) giữa giá mua/bán
 """
 
@@ -376,9 +376,9 @@ async def start_health_server():
 async def main():
     # Luôn bật health server trước để Railway không 503
     await start_health_server()
+    logger.info("🌐 Health server started on port %s", PORT)
 
-    # Nếu thiếu BOT_TOKEN, vẫn treo app để /health sống,
-    # đợi bạn set biến môi trường từ Dashboard
+    # Nếu thiếu BOT_TOKEN, vẫn treo app để /health sống
     if not BOT_TOKEN or BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         logger.error("❌ Chưa cấu hình BOT_TOKEN! Chỉ chạy /health.")
         try:
@@ -403,7 +403,20 @@ async def main():
     bot.monitoring_task = asyncio.create_task(bot.price_monitoring_loop())
 
     logger.info("🤖 Bot Giá Bạc khởi động (polling)...")
-    await application.run_polling(drop_pending_updates=True)
+
+    # ✅ Trình tự async đúng (không dùng run_polling trong event loop)
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+
+    try:
+        await asyncio.Future()  # run forever
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
