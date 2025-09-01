@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Silver Price Bot - Notify on ANY change (always-on monitor)
-- Polls the source regularly (default every 60s) and notifies immediately if price changed
-- No scheduled hourly notifications
-- Health server at /health to satisfy Railway
-- PTB v20.7, async-friendly (no run_polling inside asyncio.run)
+Silver Price Bot - Notify on ANY change (with persistent subscribers)
+- Polls regularly (POLL_SECONDS) and notifies immediately if price changed
+- Persists subscribers to /app/subscribers.json (works on Railway)
+- Health server at /health
+- PTB v20.7, async-friendly
 """
 
 import asyncio
 import logging
 import os
 import re
+import json
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, Tuple
 
@@ -33,12 +35,33 @@ GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "YOUR_GROUP_CHAT_ID")
 PRICE_URL = "https://giabac.phuquygroup.vn/"
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 PORT = int(os.environ.get("PORT", 8000))
-POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))  # change frequency, default 60s
+POLL_SECONDS = int(str(os.environ.get("POLL_SECONDS", "60")).strip().strip('"').strip("'"))  # robust parsing
+
+# Persist file (on Railway code dir). You can change to "/mnt/data/subscribers.json"
+SUBS_FILE = Path("/app/subscribers.json")
+
+def load_subscribers() -> set[int]:
+    try:
+        if SUBS_FILE.exists():
+            data = json.loads(SUBS_FILE.read_text(encoding="utf-8"))
+            subs = set(int(x) for x in data)
+            logger.info("✅ Loaded %d subscribers from %s", len(subs), SUBS_FILE)
+            return subs
+    except Exception as e:
+        logger.error("❌ Load subs error: %s", e)
+    return set()
+
+def save_subscribers(subs: set[int]) -> None:
+    try:
+        SUBS_FILE.write_text(json.dumps(sorted(list(subs))), encoding="utf-8")
+        logger.info("💾 Saved %d subscribers to %s", len(subs), SUBS_FILE)
+    except Exception as e:
+        logger.error("❌ Save subs error: %s", e)
 
 class SilverPriceBot:
     def __init__(self):
         self.price_history = []   # list[{"timestamp": dt, "prices": {...}}]
-        self.subscribers = set()  # user ids
+        self.subscribers = load_subscribers()
         self.last_prices: Dict[str, Dict] = {}
         self.application = None
         self.monitoring_task = None
@@ -163,6 +186,7 @@ class SilverPriceBot:
                 await self.application.bot.send_message(uid, msg, parse_mode="Markdown")
             except Exception:
                 self.subscribers.discard(uid)
+                save_subscribers(self.subscribers)
 
     # -------- monitor loop --------
     async def monitor_loop(self):
@@ -213,7 +237,7 @@ bot = SilverPriceBot()
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
         "🏦 *Bot Giá Bạc*\n\n"
-        "Bot sẽ theo dõi liên tục và *báo ngay khi giá thay đổi*.\n\n"
+        "Bot theo dõi liên tục và *báo ngay khi giá thay đổi*.\n\n"
         "📋 Lệnh:\n"
         "• /price - Giá hiện tại\n"
         "• /subscribe - Đăng ký nhận cảnh báo\n"
@@ -223,6 +247,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("📈 Giá hiện tại", callback_data="price"),
          InlineKeyboardButton("🔔 Đăng ký", callback_data="subscribe")],
+        [InlineKeyboardButton("🔕 Hủy đăng ký", callback_data="unsubscribe")],
     ]
     await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -246,11 +271,15 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot.subscribers.add(update.effective_user.id)
+    uid = update.effective_user.id
+    bot.subscribers.add(uid)
+    save_subscribers(bot.subscribers)
     await update.message.reply_text("🔔 Đã đăng ký nhận cảnh báo!")
 
 async def cmd_unsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot.subscribers.discard(update.effective_user.id)
+    uid = update.effective_user.id
+    bot.subscribers.discard(uid)
+    save_subscribers(bot.subscribers)
     await update.message.reply_text("🔕 Đã hủy đăng ký.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -269,8 +298,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "price":
         await cmd_price(update, context)
     elif q.data == "subscribe":
-        bot.subscribers.add(q.from_user.id)
+        uid = q.from_user.id
+        bot.subscribers.add(uid)
+        save_subscribers(bot.subscribers)
         await q.edit_message_text("🔔 Đã đăng ký nhận cảnh báo!")
+    elif q.data == "unsubscribe":
+        uid = q.from_user.id
+        bot.subscribers.discard(uid)
+        save_subscribers(bot.subscribers)
+        await q.edit_message_text("🔕 Đã hủy đăng ký.")
 
 # ========= Health server =========
 from aiohttp import web
@@ -298,7 +334,7 @@ async def start_health_server():
 
 # ========= main =========
 async def main():
-    # health first (avoid 503)
+    # health first
     await start_health_server()
     logger.info("🌐 Health server started on port %s", PORT)
 
