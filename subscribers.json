@@ -1,0 +1,22 @@
+import json
+from pathlib import Path
+
+SUBS_FILE = Path("/app/subscribers.json")  # Railway mount code ở /app
+
+def load_subscribers() -> set[int]:
+    try:
+        if SUBS_FILE.exists():
+            data = json.load(open(SUBS_FILE, "r", encoding="utf-8"))
+            return set(int(x) for x in data)
+    except Exception as e:
+        logger.error(f"❌ Load subs error: {e}")
+    return set()
+
+def save_subscribers(subs: set[int]):
+    try:
+        SUBS_FILE.write_text(
+            json.dumps(sorted(list(subs))), encoding="utf-8"
+        )
+        logger.info("💾 Saved %d subscribers", len(subs))
+    except Exception as e:
+        logger.error(f"❌ Save subs error: {e}")
