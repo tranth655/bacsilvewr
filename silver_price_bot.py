@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Silver Price Bot - Notify on ANY change (with persistent subscribers)
-- Polls regularly (POLL_SECONDS) and notifies immediately if price changed
+Silver Price Bot - Phú Quý only (notify on ANY change, persistent subscribers)
+- Polls every POLL_SECONDS; compares with last; notifies immediately on change
+- Parses ONLY the table "BẠC THƯƠNG HIỆU PHÚ QUÝ"
 - Persists subscribers to /app/subscribers.json
 - Health server at /health
-- PTB v20.7, async-friendly
+- PTB v20.7, async-friendly (no run_polling inside asyncio.run)
 """
 
 import asyncio
@@ -68,7 +69,7 @@ class SilverPriceBot:
 
     # -------- scraping --------
     async def fetch_silver_prices(self) -> Dict[str, Dict]:
-        """Fetch & parse prices from website with cache-busting reload."""
+        """Fetch & parse prices with cache-busting (hard reload semantics)."""
         try:
             import time, urllib.parse
             loop = asyncio.get_event_loop()
@@ -104,22 +105,51 @@ class SilverPriceBot:
             return {}
 
     def parse_prices(self, html: str) -> Dict[str, Dict]:
-        """Parse prices from HTML."""
+        """Parse ONLY the table 'BẠC THƯƠNG HIỆU PHÚ QUÝ' from HTML."""
         try:
             soup = BeautifulSoup(html, "html.parser")
             prices: Dict[str, Dict] = {}
             now = datetime.now(VN_TZ)
 
-            for row in soup.find_all("tr"):
+            # 1) Find heading then the next table
+            heading = soup.find(
+                lambda t: t.name in ("h1", "h2", "h3", "h4", "div", "span", "p")
+                and "BẠC THƯƠNG HIỆU PHÚ QUÝ" in t.get_text(strip=True).upper()
+            )
+            table = heading.find_next("table") if heading else None
+
+            # 2) Fallback: pick the table with most rows whose first column contains "PHÚ QUÝ"
+            if not table:
+                candidate = None
+                best_hits = 0
+                for tb in soup.find_all("table"):
+                    hits = 0
+                    for tr in tb.find_all("tr"):
+                        tds = tr.find_all("td")
+                        if tds and "PHÚ QUÝ" in tds[0].get_text(strip=True).upper():
+                            hits += 1
+                    if hits > best_hits:
+                        best_hits = hits
+                        candidate = tb
+                table = candidate
+
+            if not table:
+                logger.warning("⚠️ Không tìm thấy bảng 'BẠC THƯƠNG HIỆU PHÚ QUÝ'")
+                return {}
+
+            # 3) Iterate ONLY the rows in this table
+            for row in table.find_all("tr"):
                 tds = row.find_all("td")
                 if len(tds) < 4:
                     continue
-                product = tds[0].get_text(strip=True)
-                unit = tds[1].get_text(strip=True)
-                buy_raw = tds[2].get_text(strip=True)
-                sell_raw = tds[3].get_text(strip=True)
 
-                if "BẠC" not in product.upper():
+                product = tds[0].get_text(strip=True)
+                unit    = tds[1].get_text(strip=True)
+                buy_raw = tds[2].get_text(strip=True)
+                sell_raw= tds[3].get_text(strip=True)
+
+                name_up = product.upper()
+                if "BẠC" not in name_up or "PHÚ QUÝ" not in name_up:
                     continue
 
                 buy = self._parse_price_num(buy_raw)
@@ -132,7 +162,8 @@ class SilverPriceBot:
                         "sell_price": sell if sell > 0 else None,
                         "timestamp": now,
                     }
-            logger.info("Parsed %d products", len(prices))
+
+            logger.info("Parsed %d products (Phú Quý only)", len(prices))
             return prices
         except Exception as e:
             logger.exception("Parse error: %s", e)
@@ -237,8 +268,8 @@ bot = SilverPriceBot()
 # ========= Handlers =========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
-        "🏦 *Bot Giá Bạc*\n\n"
-        "Bot theo dõi liên tục và *báo ngay khi giá thay đổi*.\n\n"
+        "🏦 *Bot Giá Bạc (Phú Quý)*\n\n"
+        "Bot theo dõi liên tục và *báo ngay khi giá thay đổi* (chỉ bảng Phú Quý).\n\n"
         "📋 Lệnh:\n"
         "• /price - Giá hiện tại\n"
         "• /subscribe - Đăng ký nhận cảnh báo\n"
@@ -258,7 +289,7 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not prices:
         await update.message.reply_text("❌ Không thể lấy dữ liệu.")
         return
-    lines = ["💰 *GIÁ BẠC HIỆN TẠI*\n"]
+    lines = ["💰 *GIÁ BẠC HIỆN TẠI (Phú Quý)*\n"]
     for product, d in prices.items():
         lines.append(f"🔸 *{product}*")
         lines.append(f"   💵 Mua: {bot.fmt(d['buy_price'])} VND")
@@ -314,7 +345,7 @@ from aiohttp import web
 async def _health(request):
     return web.Response(
         text=(
-            "🤖 Silver Price Bot is running!\n"
+            "🤖 Silver Price Bot (Phú Quý only) is running!\n"
             f"⏰ {datetime.now(VN_TZ).strftime('%H:%M %d/%m/%Y')}\n"
             f"📊 History: {len(bot.price_history)}\n"
             f"👥 Subs: {len(bot.subscribers)}\n"
